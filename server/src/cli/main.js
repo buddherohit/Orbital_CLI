@@ -14,6 +14,7 @@ import { review } from "./commands/developer/review.js";
 import { explain } from "./commands/developer/explain.js";
 import { testGenerator } from "./commands/developer/test.js";
 import { history, resume } from "./commands/chat/history.js";
+import { configCommand } from "./commands/config/config.js";
 
 dotenv.config();
 
@@ -51,12 +52,13 @@ async function main() {
   program.addCommand(history);
   program.addCommand(resume);
 
+  // Configuration command
+  program.addCommand(configCommand);
+
   // Default action shows help
   program.action(() => {
     program.help();
   });
-
-
 
   program.parse();
 }
