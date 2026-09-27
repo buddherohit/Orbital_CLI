@@ -9,6 +9,11 @@ import { Command } from "commander";
 
 import { login, logout, whoami } from "./commands/auth/login.js";
 import { wakeUp } from "./commands/ai/wakeUp.js";
+import { commit } from "./commands/developer/commit.js";
+import { review } from "./commands/developer/review.js";
+import { explain } from "./commands/developer/explain.js";
+import { testGenerator } from "./commands/developer/test.js";
+import { history, resume } from "./commands/chat/history.js";
 
 dotenv.config();
 
@@ -28,13 +33,23 @@ async function main() {
 
   program
     .version("0.0.1")
-    .description("Orbit CLI - Device Flow Authentication");
+    .description("Orbit CLI - AI-Powered Terminal Assistant");
 
-  // Add commands
+  // Core & Auth commands
   program.addCommand(wakeUp);
   program.addCommand(login);
   program.addCommand(logout);
   program.addCommand(whoami);
+
+  // Developer Productivity commands
+  program.addCommand(commit);
+  program.addCommand(review);
+  program.addCommand(explain);
+  program.addCommand(testGenerator);
+
+  // Chat & History commands
+  program.addCommand(history);
+  program.addCommand(resume);
 
   // Default action shows help
   program.action(() => {
