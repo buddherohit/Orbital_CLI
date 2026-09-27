@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react"
 import { authClient } from "@/lib/auth-client"
 import { useRouter } from "next/navigation"
 import {
-  Terminal as TerminalIcon,
+  Terminal,
   Activity,
   Database,
   Cpu,
@@ -17,9 +17,17 @@ import {
   MessageSquare,
   Play,
   Trash2,
-  Maximize2,
-  Radio,
   CornerDownLeft,
+  Search,
+  Command as CommandIcon,
+  GitBranch,
+  Clock,
+  ShieldCheck,
+  ChevronRight,
+  Plus,
+  X,
+  Code,
+  Sliders,
 } from "lucide-react"
 
 interface Message {
@@ -47,14 +55,17 @@ interface SystemStats {
   database: string
 }
 
-interface TerminalLog {
+interface CommandBlock {
   id: string
-  type: "input" | "output" | "system" | "error"
-  text: string
+  command: string
+  output: string
+  type: "command" | "system" | "error"
   timestamp: string
+  duration?: string
+  status?: "success" | "error" | "running"
 }
 
-export default function HackerDashboard() {
+export default function WarpTerminalDashboard() {
   const { data, isPending } = authClient.useSession()
   const router = useRouter()
 
@@ -64,27 +75,62 @@ export default function HackerDashboard() {
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null)
   const [selectedConvMessages, setSelectedConvMessages] = useState<Message[]>([])
   const [loadingMessages, setLoadingMessages] = useState(false)
-  const [copiedCmd, setCopiedCmd] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const [deviceCodeInput, setDeviceCodeInput] = useState("")
   const [isApproving, setIsApproving] = useState(false)
   const [approveMsg, setApproveMsg] = useState<{ type: "success" | "error"; text: string } | null>(null)
 
-  // Interactive Web Terminal State
-  const [terminalInput, setTerminalInput] = useState("")
-  const [terminalLogs, setTerminalLogs] = useState<TerminalLog[]>([
+  // Warp-style Command Blocks
+  const [commandBlocks, setCommandBlocks] = useState<CommandBlock[]>([
     {
-      id: "init-1",
+      id: "init-banner",
+      command: "orbit --version",
+      output: `   ___       _     _ _      ____ _     ___ 
+  / _ \\ _ __| |__ (_) |_   / ___| |   |_ _|
+ | | | | '__| '_ \\| | __| | |   | |    | | 
+ | |_| | |  | |_) | | |_  | |___| |___ | | 
+  \\___/|_|  |_.__/|_|\\__|  \\____|_____|___|
+                                           
+Orbit CLI Engine v0.0.1 • Connected to Gemini 2.5 Flash • Neon PostgreSQL
+Type 'help' or click any command below to execute.`,
       type: "system",
-      text: "🪐 ORBIT://CORE_KERNEL v1.0.0 [NEON MATRIX INITIALIZED]\nType 'help' or 'orbit wakeup <query>' to start AI execution.",
       timestamp: new Date().toLocaleTimeString(),
+      status: "success",
     },
   ])
+
+  const [inputVal, setInputVal] = useState("")
   const [isExecuting, setIsExecuting] = useState(false)
   const [cmdHistory, setCmdHistory] = useState<string[]>([])
-  const [historyIndex, setHistoryIndex] = useState(-1)
-  const terminalEndRef = useRef<HTMLDivElement>(null)
+  const [historyIdx, setHistoryIdx] = useState(-1)
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false)
+  const [currentTime, setCurrentTime] = useState("")
 
-  // Fetch stats and conversation history
+  const blocksEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Clock for Tmux statusbar
+  useEffect(() => {
+    const updateTime = () => setCurrentTime(new Date().toLocaleTimeString())
+    updateTime()
+    const t = setInterval(updateTime, 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Keyboard shortcut for Cmd+K / Ctrl+K
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault()
+        setIsCommandPaletteOpen((prev) => !prev)
+      } else if (e.key === "Escape") {
+        setIsCommandPaletteOpen(false)
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [])
+
   const fetchData = async () => {
     try {
       const [statsRes, convsRes] = await Promise.all([
@@ -100,7 +146,7 @@ export default function HackerDashboard() {
         }
       }
     } catch (err) {
-      console.error("Dashboard data fetch error:", err)
+      console.error("Dashboard fetch error:", err)
     }
   }
 
@@ -111,8 +157,8 @@ export default function HackerDashboard() {
   }, [])
 
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [terminalLogs])
+    blocksEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [commandBlocks])
 
   const loadConversationDetail = async (id: string) => {
     setLoadingMessages(true)
@@ -130,31 +176,43 @@ export default function HackerDashboard() {
     }
   }
 
-  const handleCopy = (cmd: string) => {
-    navigator.clipboard.writeText(cmd)
-    setCopiedCmd(cmd)
-    setTimeout(() => setCopiedCmd(null), 2000)
+  const handleCopyText = (text: string, id: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedId(id)
+    setTimeout(() => setCopiedId(null), 2000)
   }
 
-  // Web Terminal Command Execution
-  const executeTerminalCmd = async (commandToRun?: string) => {
-    const cmd = commandToRun || terminalInput
-    if (!cmd.trim() || isExecuting) return
+  // Execute Command
+  const runCommand = async (cmdToRun?: string) => {
+    const rawCmd = cmdToRun || inputVal
+    if (!rawCmd.trim() || isExecuting) return
 
-    const trimmed = cmd.trim()
-    const time = new Date().toLocaleTimeString()
+    const cmd = rawCmd.trim()
+    const blockId = Math.random().toString(36).substring(2, 9)
+    const startTime = Date.now()
+    const timestamp = new Date().toLocaleTimeString()
 
-    // Add to logs & history
-    setTerminalLogs((prev) => [...prev, { id: Math.random().toString(), type: "input", text: trimmed, timestamp: time }])
-    setCmdHistory((prev) => [...prev, trimmed])
-    setHistoryIndex(-1)
-    setTerminalInput("")
+    setCmdHistory((prev) => [...prev, cmd])
+    setHistoryIdx(-1)
+    setInputVal("")
+    setIsCommandPaletteOpen(false)
 
-    if (trimmed.toLowerCase() === "clear" || trimmed.toLowerCase() === "cls") {
-      setTerminalLogs([])
+    if (cmd.toLowerCase() === "clear" || cmd.toLowerCase() === "cls") {
+      setCommandBlocks([])
       return
     }
 
+    // Add running block
+    const newBlock: CommandBlock = {
+      id: blockId,
+      command: cmd,
+      output: "",
+      type: "command",
+      timestamp,
+      status: "running",
+    }
+
+    setCommandBlocks((prev) => [...prev, newBlock])
     setIsExecuting(true)
 
     try {
@@ -162,55 +220,54 @@ export default function HackerDashboard() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ command: trimmed }),
+        body: JSON.stringify({ command: cmd }),
       })
 
       const data = await res.json()
-      setTerminalLogs((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          type: "output",
-          text: data.output || "Command executed.",
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      ])
+      const duration = `${Date.now() - startTime}ms`
+
+      setCommandBlocks((prev) =>
+        prev.map((b) =>
+          b.id === blockId
+            ? { ...b, output: data.output || "Command completed with no output.", status: "success", duration }
+            : b
+        )
+      )
       fetchData()
     } catch (err: any) {
-      setTerminalLogs((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          type: "error",
-          text: `[NETWORK ERROR] Failed to reach server :3005: ${err.message}`,
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      ])
+      setCommandBlocks((prev) =>
+        prev.map((b) =>
+          b.id === blockId
+            ? { ...b, output: `[EXECUTION FAILED]: ${err.message}`, status: "error", duration: "0ms" }
+            : b
+        )
+      )
     } finally {
       setIsExecuting(false)
+      inputRef.current?.focus()
     }
   }
 
-  const handleTerminalKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
-      executeTerminalCmd()
+      runCommand()
     } else if (e.key === "ArrowUp") {
       e.preventDefault()
       if (cmdHistory.length > 0) {
-        const nextIdx = historyIndex === -1 ? cmdHistory.length - 1 : Math.max(0, historyIndex - 1)
-        setHistoryIndex(nextIdx)
-        setTerminalInput(cmdHistory[nextIdx])
+        const nextIdx = historyIdx === -1 ? cmdHistory.length - 1 : Math.max(0, historyIdx - 1)
+        setHistoryIdx(nextIdx)
+        setInputVal(cmdHistory[nextIdx])
       }
     } else if (e.key === "ArrowDown") {
       e.preventDefault()
-      if (cmdHistory.length > 0 && historyIndex !== -1) {
-        const nextIdx = historyIndex + 1
+      if (cmdHistory.length > 0 && historyIdx !== -1) {
+        const nextIdx = historyIdx + 1
         if (nextIdx >= cmdHistory.length) {
-          setHistoryIndex(-1)
-          setTerminalInput("")
+          setHistoryIdx(-1)
+          setInputVal("")
         } else {
-          setHistoryIndex(nextIdx)
-          setTerminalInput(cmdHistory[nextIdx])
+          setHistoryIdx(nextIdx)
+          setInputVal(cmdHistory[nextIdx])
         }
       }
     }
@@ -237,14 +294,11 @@ export default function HackerDashboard() {
 
   if (isPending) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#030712] text-[#00ff88] font-mono">
-        <div className="relative w-16 h-16 mb-4">
-          <div className="absolute inset-0 rounded-full border-2 border-[#00ff88] animate-ping opacity-30"></div>
-          <div className="w-full h-full rounded-full border-2 border-t-[#00e5ff] border-r-transparent border-b-[#00ff88] border-l-transparent animate-spin"></div>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#080b13] text-[#00ff88]">
+        <div className="flex items-center gap-3 text-sm tracking-wider">
+          <span className="w-2 h-2 rounded-full bg-[#00ff88] animate-ping" />
+          <span>INITIALIZING WARP ENGINE...</span>
         </div>
-        <p className="animate-pulse tracking-[0.3em] text-sm text-[#00ff88]">
-          [ INITIALIZING ORBIT://CYBER_CORE ]
-        </p>
       </div>
     )
   }
@@ -254,300 +308,238 @@ export default function HackerDashboard() {
     return null
   }
 
-  const quickPresets = [
-    "orbit wakeup What is Orbital CLI and how to use it?",
-    "orbit commit",
-    "orbit review server/src/lib/auth.js",
-    "orbit explain server/src/lib/db.js",
-    "system",
-    "orbit config",
-    "orbit history",
+  const allAvailableCommands = [
+    { cmd: "orbit wakeup Write a hello world program in Rust", desc: "Interact with Gemini 2.5 Flash assistant", group: "AI Core" },
+    { cmd: "orbit commit", desc: "Analyze git diff and generate Conventional Commit messages", group: "Git Suite" },
+    { cmd: "orbit review server/src/lib/auth.js", desc: "Security and bug code audit on file", group: "Developer" },
+    { cmd: "orbit explain server/src/lib/db.js", desc: "Step-by-step logic breakdown", group: "Developer" },
+    { cmd: "orbit test server/src/services/chat.services.js", desc: "Generate automated unit test suites", group: "Developer" },
+    { cmd: "orbit history", desc: "List recent conversation streams from Neon DB", group: "History" },
+    { cmd: "orbit config", desc: "View active model and server configuration", group: "Config" },
+    { cmd: "whoami", desc: "Display current user credentials and session details", group: "Auth" },
+    { cmd: "system", desc: "Inspect live database, server port and AI latency", group: "Diagnostics" },
+    { cmd: "clear", desc: "Clear terminal execution block history", group: "Terminal" },
   ]
 
   return (
-    <div className="min-h-screen bg-[#030712] text-zinc-100 font-mono selection:bg-[#00ff88]/30 selection:text-[#00ff88] relative overflow-x-hidden">
-      {/* Laser Sweep & Glowing Background Grid */}
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#00ff880a_1px,transparent_1px),linear-gradient(to_bottom,#00ff880a_1px,transparent_1px)] bg-[size:30px_30px] pointer-events-none" />
-      <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-[#00ff88] to-transparent animate-laser pointer-events-none" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-5xl h-44 bg-gradient-to-b from-[#00e5ff12] to-transparent blur-3xl pointer-events-none" />
+    <div className="min-h-screen bg-[#080b13] text-zinc-100 flex flex-col justify-between font-mono relative selection:bg-[#00ff88]/20 selection:text-[#00ff88]">
+      {/* Subtle Laser Accent */}
+      <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#00ff88] to-transparent opacity-80" />
 
-      {/* Cyber Header Navigation */}
-      <header className="relative z-20 border-b border-[#00ff8833] bg-[#070d1d]/90 backdrop-blur-md px-4 sm:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4 shadow-[0_4px_30px_rgba(0,255,136,0.08)]">
-        <div className="flex items-center gap-3">
-          <div className="relative w-10 h-10 rounded-xl bg-black border border-[#00ff88] flex items-center justify-center text-[#00ff88] shadow-[0_0_20px_rgba(0,255,136,0.4)] animate-pulse">
-            <TerminalIcon className="w-5 h-5" />
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#00e5ff] animate-ping" />
+      {/* Warp Window Chrome / Header */}
+      <header className="border-b border-[#1e293b] bg-[#0c101c] px-4 py-2.5 flex flex-wrap items-center justify-between gap-4 select-none">
+        {/* Left: macOS Traffic Lights & Ghostty Tabs */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full bg-[#ff5f56] border border-[#e0443e] cursor-pointer" />
+            <span className="w-3 h-3 rounded-full bg-[#ffbd2e] border border-[#dea123] cursor-pointer" />
+            <span className="w-3 h-3 rounded-full bg-[#27c93f] border border-[#1aab29] cursor-pointer" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-extrabold text-lg text-transparent bg-clip-text bg-gradient-to-r from-[#00ff88] to-[#00e5ff] tracking-widest">
-                ORBIT://CORE_HACKER_HUB
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-[#00ff8820] text-[#00ff88] border border-[#00ff8855] font-bold">
-                LIVE TERMINAL
-              </span>
-            </div>
-            <p className="text-xs text-zinc-400">Terminal-First AI Engine • Better-Auth OAuth • Gemini 2.5</p>
+
+          <div className="flex items-center gap-1 bg-[#080b13] p-1 rounded-lg border border-[#1e293b]">
+            <button
+              onClick={() => setActiveTab("terminal")}
+              className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold transition-all ${
+                activeTab === "terminal"
+                  ? "bg-[#162033] text-[#00ff88] border border-[#00ff8844] shadow-[0_0_10px_rgba(0,255,136,0.15)]"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5" />
+              <span>terminal:main</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("history")}
+              className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold transition-all ${
+                activeTab === "history"
+                  ? "bg-[#162033] text-[#00e5ff] border border-[#00e5ff44] shadow-[0_0_10px_rgba(0,229,255,0.15)]"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>vault:db ({conversations.length})</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("metrics")}
+              className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold transition-all ${
+                activeTab === "metrics"
+                  ? "bg-[#162033] text-purple-400 border border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.15)]"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>system:metrics</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("device")}
+              className={`flex items-center gap-2 px-3 py-1 rounded text-xs font-semibold transition-all ${
+                activeTab === "device"
+                  ? "bg-[#162033] text-amber-400 border border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.15)]"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Key className="w-3.5 h-3.5" />
+              <span>device:keypad</span>
+            </button>
           </div>
         </div>
 
-        {/* Live Status Indicators */}
-        <div className="hidden lg:flex items-center gap-3 text-xs">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/80 border border-[#00ff8844] shadow-[0_0_10px_rgba(0,255,136,0.15)]">
-            <Radio className="w-3.5 h-3.5 text-[#00ff88] animate-pulse" />
-            <span className="text-zinc-400">STATUS:</span>
-            <span className="text-[#00ff88] font-bold">ONLINE :3005</span>
-          </div>
+        {/* Center: Command Palette Trigger */}
+        <button
+          onClick={() => setIsCommandPaletteOpen(true)}
+          className="hidden md:flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-[#080b13] border border-[#1e293b] hover:border-zinc-600 text-zinc-400 hover:text-zinc-200 text-xs transition-all"
+        >
+          <Search className="w-3.5 h-3.5 text-zinc-500" />
+          <span>Type a command or query...</span>
+          <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[10px] text-zinc-400">⌘K</kbd>
+        </button>
 
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/80 border border-[#00e5ff44] shadow-[0_0_10px_rgba(0,229,255,0.15)]">
-            <Cpu className="w-3.5 h-3.5 text-[#00e5ff]" />
-            <span className="text-zinc-400">MODEL:</span>
-            <span className="text-[#00e5ff] font-bold">{stats?.model || "gemini-2.5-flash"}</span>
-          </div>
-
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/80 border border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.15)]">
-            <Database className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-zinc-400">DB:</span>
-            <span className="text-amber-400 font-bold">NEON POSTGRES</span>
-          </div>
-        </div>
-
-        {/* User Identity & Logout */}
+        {/* Right: User & Exit */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2.5 bg-black/90 border border-[#00ff8855] px-3 py-1.5 rounded-lg shadow-[0_0_15px_rgba(0,255,136,0.1)]">
-            <img
-              src={data?.user?.image || "/avatar.png"}
-              alt="User"
-              className="w-6 h-6 rounded-full border border-[#00ff88]"
-            />
-            <div className="text-left hidden sm:block">
-              <p className="text-xs font-bold text-zinc-100">{data?.user?.name || "Hacker"}</p>
-              <p className="text-[10px] text-zinc-500 truncate max-w-[120px]">{data?.user?.email}</p>
-            </div>
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[#080b13] border border-[#1e293b] text-xs">
+            <span className="w-2 h-2 rounded-full bg-[#00ff88] animate-pulse" />
+            <span className="text-zinc-300 font-bold">{data?.user?.name || "developer"}</span>
           </div>
 
           <button
             onClick={() => authClient.signOut({ fetchOptions: { onSuccess: () => router.push("/sign-in") } })}
-            className="px-3 py-1.5 rounded-lg bg-red-950/50 border border-red-700/80 hover:bg-red-900/80 text-red-300 transition-all text-xs flex items-center gap-1.5 shadow-[0_0_10px_rgba(239,68,68,0.2)]"
-            title="Sign Out"
+            className="p-1.5 rounded-lg bg-red-950/40 border border-red-900/60 hover:bg-red-900/60 text-red-400 transition-colors text-xs"
+            title="Disconnect Session"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">DISCONNECT</span>
           </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-8 py-6 space-y-6">
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-2 border-b border-zinc-800 pb-3 overflow-x-auto">
-          <button
-            onClick={() => setActiveTab("terminal")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all ${
-              activeTab === "terminal"
-                ? "bg-[#00ff8822] border border-[#00ff88] text-[#00ff88] shadow-[0_0_20px_rgba(0,255,136,0.3)]"
-                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
-            }`}
-          >
-            <TerminalIcon className="w-4 h-4" />
-            <span>INTERACTIVE_TERMINAL</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab("history")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all ${
-              activeTab === "history"
-                ? "bg-[#00e5ff22] border border-[#00e5ff] text-[#00e5ff] shadow-[0_0_20px_rgba(0,229,255,0.3)]"
-                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
-            }`}
-          >
-            <MessageSquare className="w-4 h-4" />
-            <span>CONVERSATION_VAULT ({conversations.length})</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab("metrics")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all ${
-              activeTab === "metrics"
-                ? "bg-purple-500/20 border border-purple-400 text-purple-300 shadow-[0_0_20px_rgba(168,85,247,0.3)]"
-                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
-            }`}
-          >
-            <Activity className="w-4 h-4" />
-            <span>SYSTEM_METRICS</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab("device")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all ${
-              activeTab === "device"
-                ? "bg-amber-500/20 border border-amber-400 text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.3)]"
-                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
-            }`}
-          >
-            <Key className="w-4 h-4" />
-            <span>DEVICE_KEYPAD</span>
-          </button>
-        </div>
-
-        {/* TAB 1: INTERACTIVE WEB TERMINAL & COMMAND CENTER */}
+      {/* Main Terminal Window Workspace */}
+      <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 overflow-hidden flex flex-col">
+        {/* TAB 1: WARP TERMINAL WORKSPACE */}
         {activeTab === "terminal" && (
-          <div className="space-y-6">
-            {/* Quick Command Launcher Presets */}
+          <div className="flex-1 flex flex-col justify-between space-y-4">
+            {/* Quick Actions Ribbon */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
-              <span className="text-zinc-500 font-bold uppercase tracking-wider flex items-center gap-1 shrink-0">
-                <Play className="w-3 h-3 text-[#00ff88]" /> QUICK RUN:
-              </span>
-              {quickPresets.map((preset, idx) => (
+              <span className="text-zinc-500 font-semibold text-[11px] shrink-0">RECOMMENDED:</span>
+              {[
+                "orbit wakeup What are the key features of Orbital CLI?",
+                "orbit commit",
+                "orbit review server/src/lib/auth.js",
+                "orbit explain server/src/lib/db.js",
+                "orbit history",
+                "system",
+              ].map((cmd, i) => (
                 <button
-                  key={idx}
-                  onClick={() => executeTerminalCmd(preset)}
-                  className="px-2.5 py-1 rounded bg-[#071324] border border-zinc-800 hover:border-[#00e5ff] text-zinc-300 hover:text-[#00e5ff] shrink-0 transition-all font-mono text-[11px]"
+                  key={i}
+                  onClick={() => runCommand(cmd)}
+                  className="px-2.5 py-1 rounded-md bg-[#0e1424] border border-[#1e293b] hover:border-[#00ff88] text-zinc-300 hover:text-[#00ff88] shrink-0 transition-all text-xs"
                 >
-                  $ {preset.slice(0, 30)}
-                  {preset.length > 30 ? "..." : ""}
+                  $ {cmd.slice(0, 32)}
+                  {cmd.length > 32 ? "..." : ""}
                 </button>
               ))}
             </div>
 
-            {/* Live Interactive Hacker Terminal Box */}
-            <div className="rounded-xl border border-[#00ff8866] bg-[#050914] shadow-[0_0_40px_rgba(0,255,136,0.12)] overflow-hidden flex flex-col h-[520px]">
-              {/* Terminal Window Header */}
-              <div className="border-b border-[#00ff8833] bg-[#081020] px-4 py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full bg-red-500/80"></div>
-                  <div className="w-3 h-3 rounded-full bg-amber-500/80"></div>
-                  <div className="w-3 h-3 rounded-full bg-[#00ff88]/80"></div>
-                  <span className="ml-2 text-xs font-bold text-[#00ff88] tracking-wider">
-                    bash - orbit@terminal-hub:~ (gemini-2.5)
-                  </span>
-                </div>
+            {/* Warp Command Blocks Stream */}
+            <div className="flex-1 bg-[#0b0f19] border border-[#1e293b] rounded-xl p-4 sm:p-6 overflow-y-auto max-h-[calc(100vh-280px)] space-y-4">
+              {commandBlocks.map((block) => (
+                <div
+                  key={block.id}
+                  className="group rounded-lg border border-[#1e293b] bg-[#0e1424]/90 overflow-hidden hover:border-[#00ff8844] transition-all shadow-sm"
+                >
+                  {/* Block Header / Command Line */}
+                  <div className="bg-[#121a2d] px-4 py-2 flex items-center justify-between gap-2 text-xs border-b border-[#1e293b]">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <span className="text-[#00ff88] font-bold">❯</span>
+                      <span className="text-white font-bold truncate">{block.command}</span>
+                    </div>
 
-                <div className="flex items-center gap-2 text-xs text-zinc-400">
-                  <button
-                    onClick={() => setTerminalLogs([])}
-                    className="p-1 rounded hover:bg-zinc-800 hover:text-white"
-                    title="Clear Terminal"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
+                    <div className="flex items-center gap-2 text-[11px] text-zinc-400 shrink-0">
+                      {block.duration && (
+                        <span className="px-1.5 py-0.5 rounded bg-black/40 text-zinc-400 border border-zinc-800">
+                          {block.duration}
+                        </span>
+                      )}
+                      <span className="text-zinc-500">{block.timestamp}</span>
+                      <button
+                        onClick={() => handleCopyText(block.output, block.id)}
+                        className="p-1 rounded hover:bg-zinc-800 hover:text-[#00ff88] transition-colors"
+                        title="Copy Output"
+                      >
+                        {copiedId === block.id ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
 
-              {/* Terminal Logs Output */}
-              <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-3 leading-relaxed">
-                {terminalLogs.map((log) => (
-                  <div key={log.id}>
-                    {log.type === "input" && (
-                      <div className="flex items-center gap-2 text-[#00e5ff] font-bold">
-                        <span>orbit@root:~$</span>
-                        <span className="text-white">{log.text}</span>
-                        <span className="text-[10px] text-zinc-600 ml-auto">{log.timestamp}</span>
+                  {/* Block Content / Output */}
+                  <div className="p-4 text-xs sm:text-sm text-zinc-200 whitespace-pre-wrap leading-relaxed overflow-x-auto">
+                    {block.status === "running" ? (
+                      <div className="flex items-center gap-2 text-amber-300 animate-pulse">
+                        <span className="animate-spin">⚙️</span>
+                        <span>Orbit AI is streaming response...</span>
                       </div>
-                    )}
-
-                    {log.type === "output" && (
-                      <div className="mt-1 pl-4 border-l-2 border-[#00ff88] text-zinc-200 whitespace-pre-wrap bg-black/40 p-2.5 rounded">
-                        {log.text}
-                      </div>
-                    )}
-
-                    {log.type === "system" && (
-                      <div className="text-[#00ff88] font-bold whitespace-pre-wrap bg-[#00ff8810] p-2.5 rounded border border-[#00ff8833]">
-                        {log.text}
-                      </div>
-                    )}
-
-                    {log.type === "error" && (
-                      <div className="text-red-400 whitespace-pre-wrap bg-red-950/40 p-2.5 rounded border border-red-800">
-                        {log.text}
-                      </div>
+                    ) : (
+                      block.output
                     )}
                   </div>
-                ))}
+                </div>
+              ))}
+              <div ref={blocksEndRef} />
+            </div>
 
-                {isExecuting && (
-                  <div className="flex items-center gap-2 text-amber-300 animate-pulse pl-4 border-l-2 border-amber-400">
-                    <span className="animate-spin">⚙️</span>
-                    <span>ORBIT AI IS COMPUTING / STREAMING RESPONSE...</span>
-                  </div>
-                )}
-
-                <div ref={terminalEndRef} />
+            {/* Warp Sticky Bottom Command Prompt Input Bar */}
+            <div className="bg-[#0b0f19] border border-[#1e293b] focus-within:border-[#00ff88] rounded-xl p-3 shadow-lg transition-all">
+              <div className="flex items-center gap-2 text-xs text-zinc-400 mb-1.5 px-1 font-mono">
+                <span className="text-[#00e5ff] flex items-center gap-1">
+                  <GitBranch className="w-3 h-3" /> main
+                </span>
+                <span className="text-zinc-600">•</span>
+                <span className="text-zinc-500">~/Orbital_CLI</span>
+                <span className="text-zinc-600">•</span>
+                <span className="text-[#00ff88]">node:v22</span>
               </div>
 
-              {/* Terminal Interactive Command Input Line */}
-              <div className="border-t border-[#00ff8833] bg-[#070e1c] p-3 flex items-center gap-2">
-                <span className="text-[#00ff88] font-bold text-sm shrink-0">$</span>
+              <div className="flex items-center gap-3">
+                <span className="text-[#00ff88] font-bold text-base pl-1 shrink-0">❯</span>
                 <input
+                  ref={inputRef}
                   type="text"
-                  value={terminalInput}
-                  onChange={(e) => setTerminalInput(e.target.value)}
-                  onKeyDown={handleTerminalKeyDown}
-                  placeholder="Type 'orbit wakeup <query>', 'orbit commit', 'help', or prompt..."
+                  value={inputVal}
+                  onChange={(e) => setInputVal(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type any orbit command or question (e.g. 'orbit commit', 'help', 'orbit wakeup <query>')..."
                   disabled={isExecuting}
-                  className="flex-1 bg-transparent font-mono text-xs sm:text-sm text-[#00ff88] placeholder:text-zinc-600 outline-none"
+                  className="flex-1 bg-transparent font-mono text-sm text-white placeholder:text-zinc-600 outline-none"
                   autoFocus
                 />
                 <button
-                  onClick={() => executeTerminalCmd()}
-                  disabled={isExecuting || !terminalInput.trim()}
-                  className="px-3 py-1.5 rounded bg-[#00ff88] hover:bg-[#00e5ff] text-black font-extrabold text-xs transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1"
+                  onClick={() => runCommand()}
+                  disabled={isExecuting || !inputVal.trim()}
+                  className="px-3.5 py-1.5 rounded-lg bg-[#00ff88] hover:bg-[#00e5ff] text-black font-bold text-xs transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1.5"
                 >
-                  <span>EXEC</span>
-                  <CornerDownLeft className="w-3 h-3" />
+                  <span>RUN</span>
+                  <CornerDownLeft className="w-3.5 h-3.5" />
                 </button>
               </div>
-            </div>
-
-            {/* Cheat Sheet Matrix Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-              {[
-                { cmd: "orbit wakeup", desc: "Launch AI interactive loop (Chat, Tools, Agent)", tag: "AI CORE" },
-                { cmd: "orbit commit -a", desc: "Auto-generate conventional commit from git diff", tag: "GIT SUITE" },
-                { cmd: "orbit review server/src/lib/auth.js", desc: "Perform deep security & bug code review", tag: "AUDIT" },
-                { cmd: "orbit explain server/src/lib/db.js", desc: "Step-by-step logic and architecture explainer", tag: "EXPLAIN" },
-              ].map((c, i) => (
-                <div
-                  key={i}
-                  className="p-3.5 rounded-xl border border-zinc-800 bg-[#070c18] hover:border-[#00ff88] transition-all group"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-300 font-bold">
-                      {c.tag}
-                    </span>
-                    <button
-                      onClick={() => handleCopy(c.cmd)}
-                      className="text-xs text-zinc-500 group-hover:text-[#00ff88] flex items-center gap-1"
-                    >
-                      {copiedCmd === c.cmd ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                    </button>
-                  </div>
-                  <p className="font-mono text-xs font-bold text-[#00ff88] truncate">{c.cmd}</p>
-                  <p className="text-[11px] text-zinc-400 mt-1 leading-snug">{c.desc}</p>
-                </div>
-              ))}
             </div>
           </div>
         )}
 
         {/* TAB 2: CONVERSATION VAULT */}
         {activeTab === "history" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-4 space-y-3">
-              <div className="flex items-center justify-between text-xs text-zinc-400 pb-1">
-                <span>CONVERSATION_DATABASE</span>
-                <button onClick={fetchData} className="hover:text-[#00ff88] flex items-center gap-1">
-                  <RefreshCw className="w-3 h-3" />
-                  <span>REFRESH</span>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-220px)]">
+            <div className="lg:col-span-4 bg-[#0b0f19] border border-[#1e293b] rounded-xl p-4 flex flex-col">
+              <div className="flex items-center justify-between text-xs text-zinc-400 pb-3 border-b border-[#1e293b] mb-3">
+                <span className="font-bold text-zinc-200">CONVERSATION STREAMS</span>
+                <button onClick={fetchData} className="hover:text-[#00ff88] flex items-center gap-1 text-xs">
+                  <RefreshCw className="w-3 h-3" /> Refresh
                 </button>
               </div>
 
-              <div className="space-y-2 max-h-[560px] overflow-y-auto pr-1">
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1">
                 {conversations.length === 0 ? (
-                  <div className="text-center py-12 text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl">
-                    [ NO CONVERSATIONS IN DB ]
-                  </div>
+                  <div className="text-center py-12 text-zinc-500 text-xs">No conversations found in Neon DB</div>
                 ) : (
                   conversations.map((c) => (
                     <div
@@ -555,77 +547,64 @@ export default function HackerDashboard() {
                       onClick={() => loadConversationDetail(c.id)}
                       className={`p-3 rounded-lg border cursor-pointer transition-all ${
                         selectedConv?.id === c.id
-                          ? "bg-[#00e5ff15] border-[#00e5ff] text-white shadow-[0_0_15px_rgba(0,229,255,0.15)]"
-                          : "bg-zinc-900/60 border-zinc-800 hover:border-zinc-700 text-zinc-300"
+                          ? "bg-[#162033] border-[#00e5ff] text-white"
+                          : "bg-[#0e1424] border-[#1e293b] hover:border-zinc-700 text-zinc-300"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2 mb-1">
-                        <span
-                          className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
-                            c.mode === "agent"
-                              ? "bg-purple-950/80 text-purple-300 border border-purple-800"
-                              : c.mode === "tool"
-                              ? "bg-amber-950/80 text-amber-300 border border-amber-800"
-                              : "bg-blue-950/80 text-blue-300 border border-blue-800"
-                          }`}
-                        >
+                      <div className="flex items-center justify-between text-[10px] mb-1">
+                        <span className="px-1.5 py-0.5 rounded bg-black/50 text-[#00ff88] border border-[#00ff8844] uppercase font-bold">
                           {c.mode}
                         </span>
-                        <span className="text-[10px] text-zinc-500">{new Date(c.updatedAt).toLocaleDateString()}</span>
+                        <span className="text-zinc-500">{new Date(c.updatedAt).toLocaleDateString()}</span>
                       </div>
-                      <p className="text-xs font-bold truncate text-zinc-200">{c.title || "Untitled Chat"}</p>
-                      <p className="text-[10px] text-zinc-500 mt-1 font-mono">ID: {c.id.slice(0, 16)}...</p>
+                      <p className="text-xs font-bold truncate text-zinc-200">{c.title || "Untitled"}</p>
                     </div>
                   ))
                 )}
               </div>
             </div>
 
-            <div className="lg:col-span-8 rounded-xl border border-zinc-800 bg-[#070c18] p-5 flex flex-col h-[560px]">
-              <div className="border-b border-zinc-800 pb-3 mb-4 flex items-center justify-between">
+            <div className="lg:col-span-8 bg-[#0b0f19] border border-[#1e293b] rounded-xl p-5 flex flex-col">
+              <div className="border-b border-[#1e293b] pb-3 mb-4 flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-[#00e5ff]">{selectedConv?.title || "Select a Conversation"}</h3>
-                  <p className="text-[10px] text-zinc-500 font-mono">SESSION_ID: {selectedConv?.id || "N/A"}</p>
+                  <h3 className="text-sm font-bold text-[#00e5ff]">{selectedConv?.title || "Select Conversation"}</h3>
+                  <p className="text-[10px] text-zinc-500">ID: {selectedConv?.id || "N/A"}</p>
                 </div>
                 {selectedConv && (
                   <button
-                    onClick={() => handleCopy(`orbit resume ${selectedConv.id}`)}
-                    className="text-xs px-2.5 py-1 rounded bg-[#00e5ff1a] border border-[#00e5ff66] text-[#00e5ff] hover:bg-[#00e5ff33] flex items-center gap-1.5"
+                    onClick={() => {
+                      setActiveTab("terminal")
+                      runCommand(`orbit resume ${selectedConv.id}`)
+                    }}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-[#00e5ff22] border border-[#00e5ff55] text-[#00e5ff] hover:bg-[#00e5ff44]"
                   >
-                    <TerminalIcon className="w-3.5 h-3.5" />
-                    <span>RESUME IN CLI</span>
+                    Resume in Terminal
                   </button>
                 )}
               </div>
 
-              <div className="flex-1 overflow-y-auto space-y-4 pr-2 font-mono text-xs">
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2 text-xs">
                 {loadingMessages ? (
-                  <div className="flex items-center justify-center h-full text-zinc-500">
-                    <span className="animate-pulse">[ DECRYPTING MESSAGE PACKETS... ]</span>
-                  </div>
+                  <div className="text-center py-12 text-zinc-500 animate-pulse">Loading message records...</div>
                 ) : selectedConvMessages.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-zinc-600">
-                    [ NO MESSAGES IN THIS SESSION ]
-                  </div>
+                  <div className="text-center py-12 text-zinc-600">No message history in this session</div>
                 ) : (
                   selectedConvMessages.map((msg) => (
                     <div
                       key={msg.id}
                       className={`p-3.5 rounded-lg border leading-relaxed ${
                         msg.role === "user"
-                          ? "bg-blue-950/30 border-blue-800/60 text-blue-100 ml-6"
-                          : "bg-zinc-900/90 border-[#00ff8844] text-zinc-200 mr-6"
+                          ? "bg-[#101726] border-blue-900/60 text-blue-100 ml-6"
+                          : "bg-[#0e1424] border-[#00ff8844] text-zinc-200 mr-6"
                       }`}
                     >
-                      <div className="flex items-center justify-between text-[10px] text-zinc-500 mb-1.5 pb-1 border-b border-zinc-800">
+                      <div className="flex items-center justify-between text-[10px] text-zinc-500 mb-1 border-b border-zinc-800/60 pb-1">
                         <span className={`font-bold ${msg.role === "user" ? "text-blue-400" : "text-[#00ff88]"}`}>
-                          {msg.role === "user" ? "👤 USER_PROMPT" : "🤖 ORBIT_ASSISTANT"}
+                          {msg.role === "user" ? "USER PROMPT" : "ORBIT ASSISTANT"}
                         </span>
                         <span>{new Date(msg.createdAt).toLocaleTimeString()}</span>
                       </div>
-                      <div className="whitespace-pre-wrap font-mono text-xs text-zinc-300">
-                        {typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content, null, 2)}
-                      </div>
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
                     </div>
                   ))
                 )}
@@ -634,59 +613,32 @@ export default function HackerDashboard() {
           </div>
         )}
 
-        {/* TAB 3: METRICS */}
+        {/* TAB 3: SYSTEM METRICS */}
         {activeTab === "metrics" && (
           <div className="space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="p-5 rounded-xl border border-zinc-800 bg-[#070c18] relative overflow-hidden">
+              <div className="p-5 rounded-xl border border-[#1e293b] bg-[#0b0f19]">
                 <p className="text-xs text-zinc-400 uppercase font-bold">Total Conversations</p>
                 <p className="text-3xl font-extrabold text-[#00ff88] mt-2">{stats?.totalConversations || 0}</p>
-                <div className="text-[10px] text-zinc-500 mt-2 font-mono">Stored in Neon PostgreSQL</div>
+                <p className="text-[10px] text-zinc-500 mt-2 font-mono">Neon PostgreSQL Storage</p>
               </div>
 
-              <div className="p-5 rounded-xl border border-zinc-800 bg-[#070c18] relative overflow-hidden">
-                <p className="text-xs text-zinc-400 uppercase font-bold">Total Messages Exchanged</p>
+              <div className="p-5 rounded-xl border border-[#1e293b] bg-[#0b0f19]">
+                <p className="text-xs text-zinc-400 uppercase font-bold">Message Cycles</p>
                 <p className="text-3xl font-extrabold text-[#00e5ff] mt-2">{stats?.totalMessages || 0}</p>
-                <div className="text-[10px] text-zinc-500 mt-2 font-mono">Prompt & response cycles</div>
+                <p className="text-[10px] text-zinc-500 mt-2 font-mono">Prompt / Completion pairs</p>
               </div>
 
-              <div className="p-5 rounded-xl border border-zinc-800 bg-[#070c18] relative overflow-hidden">
-                <p className="text-xs text-zinc-400 uppercase font-bold">Active AI Model</p>
+              <div className="p-5 rounded-xl border border-[#1e293b] bg-[#0b0f19]">
+                <p className="text-xs text-zinc-400 uppercase font-bold">Active Engine</p>
                 <p className="text-lg font-extrabold text-amber-400 mt-2 truncate">{stats?.model || "gemini-2.5-flash"}</p>
-                <div className="text-[10px] text-zinc-500 mt-2 font-mono">Google GenAI SDK v2</div>
+                <p className="text-[10px] text-zinc-500 mt-2 font-mono">Google GenAI SDK v2</p>
               </div>
 
-              <div className="p-5 rounded-xl border border-zinc-800 bg-[#070c18] relative overflow-hidden">
-                <p className="text-xs text-zinc-400 uppercase font-bold">Core Node Port</p>
+              <div className="p-5 rounded-xl border border-[#1e293b] bg-[#0b0f19]">
+                <p className="text-xs text-zinc-400 uppercase font-bold">Server Port</p>
                 <p className="text-3xl font-extrabold text-purple-400 mt-2">:3005</p>
-                <div className="text-[10px] text-zinc-500 mt-2 font-mono">Express & Better-Auth Server</div>
-              </div>
-            </div>
-
-            <div className="p-6 rounded-xl border border-zinc-800 bg-[#070c18] space-y-4">
-              <h3 className="text-sm font-bold text-zinc-200 uppercase tracking-wider flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-[#00ff88]" />
-                <span>Session Modes Breakdown</span>
-              </h3>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-                <div className="p-4 rounded-lg bg-blue-950/20 border border-blue-800/40">
-                  <div className="text-xs text-blue-400 font-bold">💬 CHAT MODE</div>
-                  <div className="text-2xl font-bold text-white mt-1">{stats?.breakdown?.chat || 0}</div>
-                  <div className="text-[10px] text-zinc-500 mt-1">Direct Gemini conversation</div>
-                </div>
-
-                <div className="p-4 rounded-lg bg-amber-950/20 border border-amber-800/40">
-                  <div className="text-xs text-amber-400 font-bold">🛠️ TOOL CALLING MODE</div>
-                  <div className="text-2xl font-bold text-white mt-1">{stats?.breakdown?.tool || 0}</div>
-                  <div className="text-[10px] text-zinc-500 mt-1">Google Search + Code sandbox</div>
-                </div>
-
-                <div className="p-4 rounded-lg bg-purple-950/20 border border-purple-800/40">
-                  <div className="text-xs text-purple-400 font-bold">🤖 AGENTIC MODE</div>
-                  <div className="text-2xl font-bold text-white mt-1">{stats?.breakdown?.agent || 0}</div>
-                  <div className="text-[10px] text-zinc-500 mt-1">Multi-file application generation</div>
-                </div>
+                <p className="text-[10px] text-zinc-500 mt-2 font-mono">Express.js API Engine</p>
               </div>
             </div>
           </div>
@@ -694,14 +646,14 @@ export default function HackerDashboard() {
 
         {/* TAB 4: DEVICE KEYPAD */}
         {activeTab === "device" && (
-          <div className="max-w-md mx-auto p-6 rounded-2xl border border-amber-500/40 bg-[#070c18] shadow-[0_0_30px_rgba(245,158,11,0.08)] space-y-6">
+          <div className="max-w-md mx-auto p-6 rounded-2xl border border-amber-500/40 bg-[#0b0f19] space-y-6">
             <div className="text-center space-y-2">
               <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/40 text-amber-400 flex items-center justify-center mx-auto">
                 <Key className="w-6 h-6" />
               </div>
               <h2 className="text-lg font-bold text-zinc-100">Authorize CLI Session</h2>
               <p className="text-xs text-zinc-400">
-                Enter the 8-character user code shown on your terminal after running <span className="text-[#00ff88]">orbit login</span>.
+                Enter user code shown on terminal after running <span className="text-[#00ff88]">orbit login</span>.
               </p>
             </div>
 
@@ -711,8 +663,8 @@ export default function HackerDashboard() {
                 maxLength={8}
                 value={deviceCodeInput}
                 onChange={(e) => setDeviceCodeInput(e.target.value.toUpperCase())}
-                placeholder="ENTER CODE (E.G. KDAGM6DD)"
-                className="w-full text-center tracking-[0.3em] font-mono text-lg font-bold bg-black/70 border border-zinc-700 focus:border-amber-400 rounded-lg px-4 py-3 text-amber-300 outline-none uppercase transition-all"
+                placeholder="ENTER USER CODE"
+                className="w-full text-center tracking-[0.3em] font-mono text-lg font-bold bg-black border border-zinc-700 focus:border-amber-400 rounded-lg px-4 py-3 text-amber-300 outline-none uppercase transition-all"
               />
 
               {approveMsg && (
@@ -730,14 +682,83 @@ export default function HackerDashboard() {
               <button
                 onClick={handleQuickApprove}
                 disabled={isApproving || deviceCodeInput.length < 4}
-                className="w-full py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(245,158,11,0.3)]"
+                className="w-full py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isApproving ? "AUTHORIZING KEY..." : "GRANT TERMINAL ACCESS"}
+                {isApproving ? "AUTHORIZING..." : "GRANT ACCESS"}
               </button>
             </div>
           </div>
         )}
-      </main>
+      </div>
+
+      {/* Tmux / Powerline Bottom Status Bar */}
+      <footer className="border-t border-[#1e293b] bg-[#080b13] px-4 py-1.5 flex flex-wrap items-center justify-between gap-4 text-[11px] select-none">
+        <div className="flex items-center gap-2">
+          <span className="px-2 py-0.5 rounded bg-[#00ff88] text-black font-extrabold uppercase text-[10px]">
+            NORMAL
+          </span>
+          <span className="text-[#00e5ff] font-bold flex items-center gap-1">
+            <GitBranch className="w-3 h-3" /> main*
+          </span>
+          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-400">node:v22.20</span>
+        </div>
+
+        <div className="hidden sm:flex items-center gap-3 text-zinc-400 text-[11px]">
+          <span>orbit-engine: <strong className="text-zinc-200">gemini-2.5-flash</strong></span>
+          <span className="text-zinc-600">•</span>
+          <span>database: <strong className="text-emerald-400">neon-pg:healthy</strong></span>
+          <span className="text-zinc-600">•</span>
+          <span>server: <strong className="text-purple-400">:3005</strong></span>
+        </div>
+
+        <div className="flex items-center gap-3 text-zinc-400 text-[11px]">
+          <span>utf-8</span>
+          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-300 flex items-center gap-1 font-mono">
+            <Clock className="w-3 h-3 text-zinc-500" /> {currentTime}
+          </span>
+        </div>
+      </footer>
+
+      {/* Command Palette Modal (Cmd+K) */}
+      {isCommandPaletteOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-start justify-center pt-24 px-4">
+          <div className="w-full max-w-xl bg-[#0b0f19] border border-[#1e293b] rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
+            <div className="p-3 border-b border-[#1e293b] flex items-center gap-2">
+              <Search className="w-4 h-4 text-zinc-400" />
+              <input
+                type="text"
+                placeholder="Search commands (e.g. commit, review, explain, test, history)..."
+                className="flex-1 bg-transparent text-sm text-white outline-none font-mono"
+                autoFocus
+              />
+              <button onClick={() => setIsCommandPaletteOpen(false)} className="text-zinc-500 hover:text-zinc-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-2 max-h-80 overflow-y-auto space-y-1">
+              {allAvailableCommands.map((item, idx) => (
+                <div
+                  key={idx}
+                  onClick={() => {
+                    setActiveTab("terminal")
+                    runCommand(item.cmd)
+                  }}
+                  className="p-2.5 rounded-lg hover:bg-[#162033] hover:text-white text-zinc-300 cursor-pointer flex items-center justify-between text-xs transition-colors"
+                >
+                  <div>
+                    <span className="font-bold text-[#00ff88]">{item.cmd}</span>
+                    <p className="text-[11px] text-zinc-500 mt-0.5">{item.desc}</p>
+                  </div>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{item.group}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
